@@ -1,192 +1,387 @@
-#include "search_server.h"
-
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <map>
 #include <set>
 #include <string>
 #include <utility>
 #include <vector>
+#include <numeric>
 
 using namespace std;
 
+const int MAX_RESULT_DOCUMENT_COUNT = 5;
 const double EPSILON = 1e-6;
 
-// -------- Начало модульных тестов поисковой системы ----------
+string ReadLine() {
+    string s;
+    getline(cin, s);
+    return s;
+}
 
-// Тест проверяет, что поисковая система исключает стоп-слова при добавлении документов
-void TestExcludeStopWordsFromAddedDocumentContent() {
-    const int doc_id = 42;
-    const string content = "cat in the city"s;
-    const vector<int> ratings = { 1, 2, 3 };
-    {
-        SearchServer server;
-        server.AddDocument(doc_id, content, DocumentStatus::ACTUAL, ratings);
-        const auto found_docs = server.FindTopDocuments("in"s);
-        ASSERT_EQUAL(found_docs.size(), 1u);
-        const Document& doc0 = found_docs[0];
-        ASSERT_EQUAL(doc0.id, doc_id);
+int ReadLineWithNumber() {
+    int result;
+    cin >> result;
+    ReadLine();
+    return result;
+}
+
+vector<string> SplitIntoWords(const string& text) {
+    vector<string> words;
+    string word;
+    for (const char c : text) {
+        if (c == ' ') {
+            if (!word.empty()) {
+                words.push_back(word);
+                word.clear();
+            }
+        }
+        else {
+            word += c;
+        }
+    }
+    if (!word.empty()) {
+        words.push_back(word);
     }
 
+    return words;
+}
+
+struct Document {
+    Document() = default;
+
+    Document(int id, double relevance, int rating)
+        : id(id)
+        , relevance(relevance)
+        , rating(rating) {
+    }
+
+    int id = 0;
+    double relevance = 0.0;
+    int rating = 0;
+};
+
+template <typename StringContainer>
+set<string> MakeUniqueNonEmptyStrings(const StringContainer& strings) {
+    set<string> non_empty_strings;
+    for (const string& str : strings) {
+        if (!str.empty()) {
+            non_empty_strings.insert(str);
+        }
+    }
+    return non_empty_strings;
+}
+
+enum class DocumentStatus {
+    ACTUAL,
+    IRRELEVANT,
+    BANNED,
+    REMOVED,
+};
+
+class SearchServer {
+public:
+    // Defines an invalid document id
+    // You can refer this constant as SearchServer::INVALID_DOCUMENT_ID
+    inline static constexpr int INVALID_DOCUMENT_ID = -1;
+
+    template <typename StringContainer>
+    explicit SearchServer(const StringContainer& stop_words)
+        : stop_words_(MakeUniqueNonEmptyStrings(stop_words)) {
+        for (const string& word : stop_words_)
+            if (!IsValidWord(word))
+                throw invalid_argument("Stop words contain invalid symbols"s);
+    }
+
+    explicit SearchServer(const string& stop_words_text)
+        : SearchServer(SplitIntoWords(stop_words_text))  // Invoke delegating constructor from string container
     {
-        SearchServer server;
-        server.SetStopWords("in the"s);
-        server.AddDocument(doc_id, content, DocumentStatus::ACTUAL, ratings);
-        ASSERT_HINT(server.FindTopDocuments("in"s).empty(), "Stop words must be excluded from documents"s);
+    }
+
+    void AddDocument(int document_id, const string& document, DocumentStatus status,
+        const vector<int>& ratings) {
+        if ((document_id < 0) || (documents_.count(document_id) > 0)) {
+            throw invalid_argument("The document id must be unique and non-negative");
+        }
+        vector<string> words = SplitIntoWordsNoStop(document);
+
+        const double inv_word_count = 1.0 / words.size();
+        for (const string& word : words) {
+            word_to_document_freqs_[word][document_id] += inv_word_count;
+        }
+        documents_.emplace(document_id, DocumentData{ ComputeAverageRating(ratings), status });
+        document_ids_.push_back(document_id);
+    }
+
+    template <typename DocumentPredicate>
+    vector<Document> FindTopDocuments(const string& raw_query, DocumentPredicate document_predicate) const {
+        Query query = ParseQuery(raw_query);
+
+        auto matched_documents = FindAllDocuments(query, document_predicate);
+
+        sort(matched_documents.begin(), matched_documents.end(), [](const Document& lhs, const Document& rhs) {
+            if (abs(lhs.relevance - rhs.relevance) < EPSILON) {
+                return lhs.rating > rhs.rating;
+            }
+            else {
+                return lhs.relevance > rhs.relevance;
+            }
+            });
+        if (matched_documents.size() > MAX_RESULT_DOCUMENT_COUNT) {
+            matched_documents.resize(MAX_RESULT_DOCUMENT_COUNT);
+        }
+
+        return matched_documents;
+    }
+
+    vector<Document> FindTopDocuments(const string& raw_query, DocumentStatus status) const {
+        return FindTopDocuments(
+            raw_query,
+            [status](int document_id, DocumentStatus document_status, int rating) {
+                return document_status == status;
+            });
+    }
+
+    vector<Document> FindTopDocuments(const string& raw_query) const {
+        return FindTopDocuments(raw_query, DocumentStatus::ACTUAL);
+    }
+
+    int GetDocumentCount() const {
+        return documents_.size();
+    }
+
+    int GetDocumentId(int index) const {
+        if (index < 0 || index >= GetDocumentCount()) {
+            throw out_of_range("Invalid document index"s);
+        }
+        return document_ids_[index];
+    }
+
+    tuple<vector<string>, DocumentStatus> MatchDocument(const string& raw_query, int document_id) const {
+        Query query = ParseQuery(raw_query);
+
+        vector<string> matched_words;
+        for (const string& word : query.plus_words) {
+            if (word_to_document_freqs_.count(word) == 0) {
+                continue;
+            }
+            if (word_to_document_freqs_.at(word).count(document_id)) {
+                matched_words.push_back(word);
+            }
+        }
+        for (const string& word : query.minus_words) {
+            if (word_to_document_freqs_.count(word) == 0) {
+                continue;
+            }
+            if (word_to_document_freqs_.at(word).count(document_id)) {
+                matched_words.clear();
+                break;
+            }
+        }
+
+        return tuple{ matched_words, documents_.at(document_id).status };
+    }
+
+private:
+    struct DocumentData {
+        int rating;
+        DocumentStatus status;
+    };
+    const set<string> stop_words_;
+    map<string, map<int, double>> word_to_document_freqs_;
+    map<int, DocumentData> documents_;
+    vector<int> document_ids_;
+
+    bool IsStopWord(const string& word) const {
+        return stop_words_.count(word) > 0;
+    }
+
+    static bool IsValidWord(const string& word) {
+        // A valid word must not contain special characters
+        return none_of(word.begin(), word.end(), [](char c) {
+            return c >= '\0' && c < ' ';
+            });
+    }
+
+    vector<string> SplitIntoWordsNoStop(const string& text) const {
+        vector<string> words;
+        for (const string& word : SplitIntoWords(text)) {
+            if (!IsValidWord(word)) {
+                throw invalid_argument("Some words have invalid symbols"s);
+            }
+            if (!IsStopWord(word)) {
+                words.push_back(word);
+            }
+        }
+        return words;
+    }
+
+    static int ComputeAverageRating(const vector<int>& ratings) {
+        if (ratings.empty()) {
+            return 0;
+        }
+        int rating_sum = accumulate(ratings.begin(), ratings.end(), 0);
+        return rating_sum / static_cast<int>(ratings.size());
+    }
+
+    struct QueryWord {
+        string data;
+        bool is_minus;
+        bool is_stop;
+    };
+
+    QueryWord ParseQueryWord(string text) const {
+        if (text.empty()) {
+            throw invalid_argument("Invalid search request"s);
+        }
+        bool is_minus = false;
+        if (text[0] == '-') {
+            is_minus = true;
+            text = text.substr(1);
+        }
+        if (text.empty() || text[0] == '-' || !IsValidWord(text)) {
+            throw invalid_argument("Invalid search request"s);
+        }
+
+        return QueryWord{ text, is_minus, IsStopWord(text) };
+    }
+
+    struct Query {
+        set<string> plus_words;
+        set<string> minus_words;
+    };
+
+    Query ParseQuery(const string& text) const {
+        // Empty result by initializing it with default constructed Query
+        Query query;
+
+        for (const string& word : SplitIntoWords(text)) {
+            QueryWord query_word = ParseQueryWord(word);
+
+            if (!query_word.is_stop) {
+                if (query_word.is_minus) {
+                    query.minus_words.insert(query_word.data);
+                }
+                else {
+                    query.plus_words.insert(query_word.data);
+                }
+            }
+        }
+        return query;
+    }
+
+    // Existence required
+    double ComputeWordInverseDocumentFreq(const string& word) const {
+        return log(GetDocumentCount() * 1.0 / word_to_document_freqs_.at(word).size());
+    }
+
+    template <typename DocumentPredicate>
+    vector<Document> FindAllDocuments(const Query& query, DocumentPredicate document_predicate) const {
+        map<int, double> document_to_relevance;
+        for (const string& word : query.plus_words) {
+            if (word_to_document_freqs_.count(word) == 0) {
+                continue;
+            }
+            const double inverse_document_freq = ComputeWordInverseDocumentFreq(word);
+            for (const auto [document_id, term_freq] : word_to_document_freqs_.at(word)) {
+                const auto& document_data = documents_.at(document_id);
+                if (document_predicate(document_id, document_data.status, document_data.rating)) {
+                    document_to_relevance[document_id] += term_freq * inverse_document_freq;
+                }
+            }
+        }
+
+        for (const string& word : query.minus_words) {
+            if (word_to_document_freqs_.count(word) == 0) {
+                continue;
+            }
+            for (const auto [document_id, _] : word_to_document_freqs_.at(word)) {
+                document_to_relevance.erase(document_id);
+            }
+        }
+
+        vector<Document> matched_documents;
+        for (const auto [document_id, relevance] : document_to_relevance) {
+            matched_documents.push_back({ document_id, relevance, documents_.at(document_id).rating });
+        }
+        return matched_documents;
+    }
+};
+
+// ==================== для примера =========================
+
+void PrintDocument(const Document& document) {
+    cout << "{ "s
+        << "document_id = "s << document.id << ", "s
+        << "relevance = "s << document.relevance << ", "s
+        << "rating = "s << document.rating << " }"s << endl;
+}
+
+void PrintMatchDocumentResult(int document_id, const vector<string>& words, DocumentStatus status) {
+    cout << "{ "s
+        << "document_id = "s << document_id << ", "s
+        << "status = "s << static_cast<int>(status) << ", "s
+        << "words ="s;
+    for (const string& word : words) {
+        cout << ' ' << word;
+    }
+    cout << "}"s << endl;
+}
+
+void AddDocument(SearchServer& search_server, int document_id, const string& document, DocumentStatus status,
+    const vector<int>& ratings) {
+    try {
+        search_server.AddDocument(document_id, document, status, ratings);
+    }
+    catch (const exception& e) {
+        cout << "Error during adding of the document "s << document_id << ": "s << e.what() << endl;
     }
 }
 
-void TestAddDocument() {
-    SearchServer server;
-    int documents_count = server.GetDocumentCount();
-    ASSERT_HINT(documents_count == 0, "After creation the object has a non-empty list of added documents"s);
-    server.AddDocument(1, "cat"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(2, "dog in the city"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(3, "dog with pretty eyes"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(4, "bird eugene"s, DocumentStatus::BANNED, { 1, 2, 3 });
-    server.AddDocument(5, "cat in the city"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-
-    documents_count = server.GetDocumentCount();
-    ASSERT_EQUAL_HINT(documents_count, 5, "The wrong number of documents was added"s);
-
-    vector<int> result;
-    for (const auto& document : server.FindTopDocuments("cat in the city"s))
-        result.push_back(document.id);
-    ASSERT_HINT(result.size() == 3, "Not all added documents were found by request"s);
-    vector<int> expected = { 1, 5, 2 };
-    ASSERT(result == expected);
+void FindTopDocuments(const SearchServer& search_server, const string& raw_query) {
+    cout << "Search results for: "s << raw_query << endl;
+    try {
+        for (const Document& document : search_server.FindTopDocuments(raw_query)) {
+            PrintDocument(document);
+        }
+    }
+    catch (const exception& e) {
+        cout << "Error during searching: "s << e.what() << endl;
+    }
 }
 
-void TestExcludeDocumentsWithMinusWordsFromResult() {
-    SearchServer server;
-    server.AddDocument(1, "cat in the city"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-
-    ASSERT_HINT(server.FindTopDocuments("-in"s).empty(), "Documents with minus-words must be excluded from the results");
+void MatchDocuments(const SearchServer& search_server, const string& query) {
+    try {
+        cout << "Matching documents for the request: "s << query << endl;
+        const int document_count = search_server.GetDocumentCount();
+        for (int index = 0; index < document_count; ++index) {
+            const int document_id = search_server.GetDocumentId(index);
+            const auto [words, status] = search_server.MatchDocument(query, document_id);
+            PrintMatchDocumentResult(document_id, words, status);
+        }
+    }
+    catch (const exception& e) {
+        cout << "Error during matching documents for the request "s << query << ": "s << e.what() << endl;
+    }
 }
 
-void TestMatchingDocuments() {
-    SearchServer server;
-    server.AddDocument(1, "cat in the city"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(2, "dog in the box"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(3, "dog in big box"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(4, "bird eugene in the city"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    const string query = "in the city -eugene";
-    vector<string> expectation;
+int main() {
+    SearchServer search_server("and in on"s);
 
-    const auto [result0, _0] = server.MatchDocument(query, 4);
-    ASSERT_EQUAL_HINT(result0.size(), 0, "Documents with minus-words must be excluded from the results");
+    AddDocument(search_server, 1, "fluffy cat fluffy tail"s, DocumentStatus::ACTUAL, { 7, 2, 7 });
+    AddDocument(search_server, 1, "fluffy dog and fashion belt"s, DocumentStatus::ACTUAL, { 1, 2 });
+    AddDocument(search_server, -1, "fluffy dog and fashion belt"s, DocumentStatus::ACTUAL, { 1, 2 });
+    AddDocument(search_server, 3, "big dog bi\x12rd eugene"s, DocumentStatus::ACTUAL, { 1, 3, 2 });
+    AddDocument(search_server, 4, "big dog bird eugene"s, DocumentStatus::ACTUAL, { 1, 1, 1 });
 
-    const auto [result1, _1] = server.MatchDocument(query, 3);
-    ASSERT_HINT(result1.size() == 1, "The wrong number of words was found"s);
-    expectation = { "in"s };
-    ASSERT_HINT(result1 == expectation, "Wrong words were found"s);
+    FindTopDocuments(search_server, "fluffy -dog"s);
+    FindTopDocuments(search_server, "fluffy --cat"s);
+    FindTopDocuments(search_server, "fluffy -"s);
 
-    const auto [result2, _2] = server.MatchDocument(query, 2);
-    ASSERT_HINT(result2.size() == 2, "Not all added documents were found by request"s);
-    expectation = { "in"s, "the"s };
-    ASSERT_HINT(result2 == expectation, "Wrong words were found"s);
+    MatchDocuments(search_server, "fluffy dog"s);
+    MatchDocuments(search_server, "fashion -cat"s);
+    MatchDocuments(search_server, "fashion --dog"s);
+    MatchDocuments(search_server, "fluffy - tail"s);
 
-    const auto [result3, _3] = server.MatchDocument(query, 1);
-    ASSERT_HINT(result3.size() == 3, "Not all added documents were found by request"s);
-    expectation = { "city"s, "in"s, "the"s };
-    ASSERT_HINT(result3 == expectation, "Wrong words were found"s);
+    cout << search_server.GetDocumentId(100);
 }
-
-void TestRelevanceSort() {
-    SearchServer server;
-    server.AddDocument(1, "cat"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(2, "dog in the city"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(3, "dog with pretty eyes"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(4, "bird eugene"s, DocumentStatus::BANNED, { 1, 2, 3 });
-    server.AddDocument(5, "cat in the city"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-
-    const auto result = server.FindTopDocuments("bird in the city"s);
-
-    ASSERT(result.size() == 2);
-    ASSERT_HINT((result[0]).id == 2, "Results should be sorted in descending order of relevance"s);
-    ASSERT_HINT((result[1]).id == 5, "Results should be sorted in descending order of relevance"s);
-}
-
-void TestComputeAverageRating() {
-    SearchServer server;
-    server.AddDocument(1, "cat"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(2, "dog in the city"s, DocumentStatus::ACTUAL, { 4, 5, 6 });
-    server.AddDocument(3, "dog with pretty eyes"s, DocumentStatus::IRRELEVANT, { 1, 2, 3 });
-    server.AddDocument(4, "bird eugene"s, DocumentStatus::BANNED, { 1, 2, 3 });
-    server.AddDocument(5, "cat in the city"s, DocumentStatus::ACTUAL, { 7, 8, 9 });
-    const string query = "cat in the city"s;
-
-    vector<int> result;
-    for (const auto& document : server.FindTopDocuments(query, DocumentStatus::ACTUAL))
-        result.push_back(document.rating);
-    vector<int> expected_ratings = { 8, 2, 5 };
-
-    ASSERT_HINT(result.size() == 3, "Not all added documents were found by request"s);
-    ASSERT_HINT(result == expected_ratings, "The rating of the added document must be equal to the arithmetic mean of the ratings of the document"s);
-}
-
-void TestSearchByFixedStatus() {
-    SearchServer server;
-    server.AddDocument(1, "cat"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(2, "dog in the city"s, DocumentStatus::ACTUAL, { 4, 5, 6 });
-    server.AddDocument(3, "dog with the pretty eye"s, DocumentStatus::IRRELEVANT, { 1, 2, 3 });
-    server.AddDocument(4, "bird eugene in the city"s, DocumentStatus::BANNED, { 1, 2, 3 });
-    server.AddDocument(5, "cat in the city"s, DocumentStatus::ACTUAL, { 7, 8, 9 });
-    const string query = "cat in the city"s;
-
-    vector<Document> result1 = server.FindTopDocuments(query, DocumentStatus::IRRELEVANT);
-    ASSERT_EQUAL_HINT(result1.size(), 1, "Documents with IRRELEVANT status are processed incorrectly"s);
-    ASSERT_HINT((result1[0]).id == 3, "Documents with IRRELEVANT status are processed incorrectly"s);
-
-    vector<Document> result2 = server.FindTopDocuments(query, DocumentStatus::BANNED);
-    ASSERT_EQUAL_HINT(result2.size(), 1, "Documents with BANNED status are processed incorrectly"s);
-    ASSERT_HINT((result2[0]).id == 4, "Documents with BANNED status are processed incorrectly"s);
-
-    vector<int> result3;
-    for (const auto& document : server.FindTopDocuments(query, DocumentStatus::ACTUAL))
-        result3.push_back(document.id);
-    ASSERT_EQUAL_HINT(result3.size(), 3, "Documents with ACTUAL status are processed incorrectly"s);
-    vector<int> expected = { 1, 5, 2 };
-    ASSERT_HINT(result3 == expected, "Documents with ACTUAL status are processed incorrectly"s);
-}
-
-void TestSearchByPredicate() {
-    SearchServer server;
-    server.AddDocument(1, "cat"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(2, "dog in the city"s, DocumentStatus::ACTUAL, { 4, 5, 6 });
-    server.AddDocument(3, "dog with pretty eyes"s, DocumentStatus::IRRELEVANT, { 1, 2, 3 });
-    server.AddDocument(4, "bird eugene in the city"s, DocumentStatus::BANNED, { 1, 2, 3 });
-    server.AddDocument(5, "cat in the city"s, DocumentStatus::ACTUAL, { 7, 8, 9 });
-    const string query = "cat in the city"s;
-
-    const auto result = server.FindTopDocuments(query, [](int document_id, DocumentStatus status, int rating) { return document_id % 2 == 0; });
-    ASSERT_EQUAL_HINT(result.size(), 2, "Documents with custom predicate are processed incorrectly"s);
-}
-
-void TestComputeRelevance() {
-    SearchServer server;
-    server.AddDocument(1, "cat"s, DocumentStatus::ACTUAL, { 1, 2, 3 });
-    server.AddDocument(2, "dog in the city"s, DocumentStatus::ACTUAL, { 4, 5, 6 });
-    server.AddDocument(3, "dog with pretty eyes"s, DocumentStatus::IRRELEVANT, { 1, 2, 3 });
-    server.AddDocument(4, "bird eugene in the city"s, DocumentStatus::BANNED, { 1, 2, 3 });
-    server.AddDocument(5, "cat in the city"s, DocumentStatus::ACTUAL, { 7, 8, 9 });
-
-    vector<Document> result = server.FindTopDocuments("cat in the city"s, DocumentStatus::ACTUAL);
-    ASSERT(result.size() == 3);
-    ASSERT_HINT(abs(result[0].relevance - log(server.GetDocumentCount() * 1.0 / 2)) < EPSILON, "Document relevance is calculated incorrectly"s);
-}
-
-// Функция TestSearchServer является точкой входа для запуска тестов
-void TestSearchServer() {
-    RUN_TEST(TestExcludeStopWordsFromAddedDocumentContent);
-    RUN_TEST(TestAddDocument);
-    RUN_TEST(TestExcludeDocumentsWithMinusWordsFromResult);
-    RUN_TEST(TestMatchingDocuments);
-    RUN_TEST(TestRelevanceSort);
-    RUN_TEST(TestComputeAverageRating);
-    RUN_TEST(TestSearchByFixedStatus);
-    RUN_TEST(TestSearchByPredicate);
-    RUN_TEST(TestComputeRelevance);
-}
-
-// --------- Окончание модульных тестов поисковой системы -----------
