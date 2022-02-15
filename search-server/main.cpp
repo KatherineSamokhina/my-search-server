@@ -89,8 +89,10 @@ public:
     explicit SearchServer(const StringContainer& stop_words)
         : stop_words_(MakeUniqueNonEmptyStrings(stop_words)) {
         for (const string& word : stop_words_)
-            if (!IsValidWord(word))
-                throw invalid_argument("Stop words contain invalid symbols"s);
+            if (!IsValidWord(word)) {
+                string error_text = "Stop word contain invalid symbols: "s + word;
+                throw invalid_argument(error_text);
+            }
     }
 
     explicit SearchServer(const string& stop_words_text)
@@ -100,8 +102,11 @@ public:
 
     void AddDocument(int document_id, const string& document, DocumentStatus status,
         const vector<int>& ratings) {
-        if ((document_id < 0) || (documents_.count(document_id) > 0)) {
-            throw invalid_argument("The document id must be unique and non-negative");
+        if (document_id < 0) {
+            throw invalid_argument("The document id must be non-negative"s);
+        }
+        if (documents_.count(document_id) > 0) {
+            throw invalid_argument("The document id must be unique, such id already exists"s);
         }
         vector<string> words = SplitIntoWordsNoStop(document);
 
