@@ -3,24 +3,16 @@
 
 std::vector<int> FindDuplicates(SearchServer& search_server) {
 	std::vector<int> to_remove;
-	for (auto it_first = search_server.begin(); it_first != search_server.end() - 1; ++it_first) {
-		if (count(to_remove.begin(), to_remove.end(), *it_first) != 0)
-			continue;
-		std::map<std::string, double> first = search_server.GetWordFrequencies(*it_first);
-		for (auto it_second = it_first + 1; it_second != search_server.end(); ++it_second) {
-			std::map<std::string, double> second = search_server.GetWordFrequencies(*it_second);
-			bool is_equal = true;
-			if (first.size() != second.size())
-				continue;
-			for (const auto& [key, _] : first) {
-				if (second.count(key) == 0) {
-					is_equal = false;
-					break;
-				}
-			}
-			if (is_equal)
-				to_remove.push_back(*it_second);
-		}
+	std::set<std::set<std::string>> unique_words;
+	for (auto it = search_server.begin(); it != search_server.end(); ++it) {
+		std::map<std::string, double> word_to_freq = search_server.GetWordFrequencies(*it);
+		std::set<std::string> words;
+		for (const auto& [word, _] : word_to_freq)
+			words.insert(word);
+		if (unique_words.count(words) == 0)
+			unique_words.insert(words);
+		else
+			to_remove.push_back(*it);
 	}
 	return to_remove;
 }

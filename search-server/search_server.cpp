@@ -21,7 +21,7 @@ void SearchServer::AddDocument(int document_id, const std::string& document, Doc
         document_to_word_freqs_[document_id][word] += inv_word_count;
     }
     documents_.emplace(document_id, DocumentData{ ComputeAverageRating(ratings), status });
-    document_ids_.push_back(document_id);
+    document_ids_.insert(document_id);
 }
 
 std::vector<Document> SearchServer::FindTopDocuments(const std::string& raw_query, DocumentStatus status) const {
@@ -40,19 +40,11 @@ int SearchServer::GetDocumentCount() const {
     return (int)documents_.size();
 }
 
-/*
-int SearchServer::GetDocumentId(int index) const {
-    if (index < 0 || index >= GetDocumentCount()) {
-        throw std::out_of_range("Invalid document index");
-    }
-    return document_ids_[index];
-}*/
-
-std::vector<int>::const_iterator SearchServer::begin() const {
+std::set<int>::const_iterator SearchServer::begin() const {
     return document_ids_.begin();
 }
 
-std::vector<int>::const_iterator SearchServer::end() const {
+std::set<int>::const_iterator SearchServer::end() const {
     return document_ids_.end();
 }
 
@@ -153,21 +145,20 @@ double SearchServer::ComputeWordInverseDocumentFreq(const std::string& word) con
 
 const std::map<std::string, double>& SearchServer::GetWordFrequencies(int document_id) const {
     if (document_to_word_freqs_.count(document_id) == 0) {
-        static std::map<std::string, double> result;
+        static const std::map<std::string, double> result;
         return result;
     }
-    else
-        return document_to_word_freqs_.at(document_id);
+    return document_to_word_freqs_.at(document_id);
 }
 
 void SearchServer::RemoveDocument(int document_id) {
     auto pos_to_remove = std::find(document_ids_.begin(), document_ids_.end(), document_id);
-    if (pos_to_remove != document_ids_.end()) {
-        document_ids_.erase(pos_to_remove);
-        documents_.erase(document_id);
-        document_to_word_freqs_.erase(document_id);
-        for (auto& [word,document] : word_to_document_freqs_) {
-            document.erase(document_id);
-        }
+    if (pos_to_remove == document_ids_.end())
+        return;
+    document_ids_.erase(pos_to_remove);
+    documents_.erase(document_id);
+    for (auto& [word,_] : document_to_word_freqs_.at(document_id)) {
+        word_to_document_freqs_[word].erase(document_id);
     }
+    document_to_word_freqs_.erase(document_id);
 }
