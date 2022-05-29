@@ -3,10 +3,10 @@
 
 std::vector<int> FindDuplicates(SearchServer& search_server) {
 	std::vector<int> to_remove;
-	std::set<std::set<std::string>> unique_words;
+	std::set<std::set<std::string_view>> unique_words;
 	for (auto it = search_server.begin(); it != search_server.end(); ++it) {
-		std::map<std::string, double> word_to_freq = search_server.GetWordFrequencies(*it);
-		std::set<std::string> words;
+		std::map<std::string_view, double> word_to_freq = search_server.GetWordFrequencies(*it);
+		std::set<std::string_view> words;
 		for (const auto& [word, _] : word_to_freq)
 			words.insert(word);
 		if (unique_words.count(words) == 0)

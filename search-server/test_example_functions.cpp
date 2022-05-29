@@ -1,28 +1,28 @@
 #include "test_example_functions.h"
 
-void PrintDocument(const Document& document) {
+void PrintDocument_(const Document& document) {
     std::cout << "{ "
         << "document_id = " << document.id << ", "
         << "relevance = " << document.relevance << ", "
         << "rating = " << document.rating << " }" << std::endl;
 }
 
-void PrintMatchDocumentResult(int document_id, const std::vector<std::string>& words, DocumentStatus status) {
+void PrintMatchDocumentResult(int document_id, const std::vector<std::string_view>& words, DocumentStatus status) {
     std::cout << "{ "
         << "document_id = " << document_id << ", "
         << "status = " << static_cast<int>(status) << ", "
         << "words =";
-    for (const std::string& word : words) {
+    for (const auto word : words) {
         std::cout << ' ' << word;
     }
     std::cout << "}" << std::endl;
 }
 
-void FindTopDocuments(const SearchServer& search_server, const std::string& raw_query) {
+void FindTopDocuments(const SearchServer& search_server, const std::string_view raw_query) {
     std::cout << "Search results for: " << raw_query << std::endl;
     try {
         for (const Document& document : search_server.FindTopDocuments(raw_query)) {
-            PrintDocument(document);
+            PrintDocument_(document);
         }
     }
     catch (const std::exception& e) {
@@ -30,7 +30,7 @@ void FindTopDocuments(const SearchServer& search_server, const std::string& raw_
     }
 }
 
-void MatchDocuments(const SearchServer& search_server, const std::string& query) {
+void MatchDocuments(const SearchServer& search_server, const std::string_view query) {
     try {
         std::cout << "Matching documents for the request: " << query << std::endl;
         for (const int document_id : search_server) {
